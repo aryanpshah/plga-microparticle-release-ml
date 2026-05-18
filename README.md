@@ -1,7 +1,6 @@
 # Diagnosing Predictability Limits of In Vitro Drug Release from Published PLGA Microparticle Data
 
 This repository provides a minimal reproduction protocol focused on generating results outputs.
-It intentionally excludes manuscript assets (paper drafts, TeX, submission scratch/fixes).
 
 ---
 
@@ -10,9 +9,9 @@ It intentionally excludes manuscript assets (paper drafts, TeX, submission scrat
 - **Tables / metrics:** Regression R² and MAE (Peppas n, Peppas K, Burst 24 h), burst classification accuracy, benchmark R² by model.
 - **Validation:** Strict 80/20 grouped train/test split for burst classification (no leakage).
 
-### Result definition alignment
+### Analysis definitions
 
-When logic differs between prior artifact packaging and manuscript-sync definitions, this repository follows manuscript-sync result definitions in the pipeline:
+The pipeline uses the following analysis definitions:
 - Minimum release profile points per formulation: **5, matching the curated dataset inclusion criterion.**
 - Peppas fit cutoff on release fraction: **`Release <= 0.60`**
 - Burst classification target: **binary**, positive class when **`Burst_24h >= 0.20`**
