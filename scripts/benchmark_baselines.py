@@ -1,17 +1,16 @@
-"""
-Benchmark baseline models vs stacked ensemble (10-fold group CV).
-Writes benchmark_results.csv to output_dir for use by visualization.
-"""
+"""Run baseline model benchmarks."""
 
 import warnings
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 import xgboost as xgb
 from sklearn.ensemble import RandomForestRegressor, StackingRegressor
+from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LinearRegression, Ridge
-from sklearn.metrics import mean_absolute_error, r2_score
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import GroupKFold, cross_val_predict
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
@@ -40,7 +39,7 @@ def run_benchmarks(
     initial_path: str,
     output_dir: Optional[str] = None,
 ) -> None:
-    """Run 10-fold group CV for Linear, RF, XGBoost, StackedEnsemble; write CSV to output_dir."""
+    """Run grouped-CV benchmarks."""
     out = Path(output_dir) if output_dir else Path(".")
     out.mkdir(parents=True, exist_ok=True)
     import logging
@@ -48,7 +47,6 @@ def run_benchmarks(
     pipeline = PLGAPrecisionPipeline(raw_path, initial_path, str(out))
     pipeline.engineer_features()
     pipeline.engineer_targets()
-    pipeline.df = pipeline.df.fillna(pipeline.df.mean(numeric_only=True))
     df = pipeline.df
     targets = ["Peppas_n", "Peppas_K", "Burst_24h"]
     feature_cols = FEATURE_COLS
@@ -84,12 +82,17 @@ def run_benchmarks(
         y_curr = y[valid_mask]
         groups_curr = groups[valid_mask]
         for name, model in models.items():
-            pipe = Pipeline([("scaler", StandardScaler()), ("model", model)])
+            pipe = Pipeline([
+                ("imputer", SimpleImputer(strategy="mean")),
+                ("scaler", StandardScaler()),
+                ("model", model),
+            ])
             try:
                 preds = cross_val_predict(pipe, X_curr, y_curr, cv=gkf, groups=groups_curr, n_jobs=-1)
                 r2 = r2_score(y_curr, preds)
                 mae = mean_absolute_error(y_curr, preds)
-                results.append({"Target": target, "Model": name, "R2": r2, "MAE": mae})
+                rmse = np.sqrt(mean_squared_error(y_curr, preds))
+                results.append({"Target": target, "Model": name, "R2": r2, "MAE": mae, "RMSE": rmse})
             except Exception as e:
                 import logging
                 logging.getLogger(__name__).warning("Benchmark %s failed: %s", name, e)

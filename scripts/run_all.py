@@ -1,9 +1,4 @@
-"""
-Single entrypoint to reproduce the paper's main results.
-
-Runs: (1) main pipeline, (2) benchmarks, (3) rigorous validation,
-(4) refinement visualizations. All outputs go to outputs/.
-"""
+"""Run the result-producing pipeline."""
 
 import argparse
 import logging
@@ -26,7 +21,7 @@ def main() -> None:
     parser.add_argument(
         "--fast",
         action="store_true",
-        help="Skip benchmarks and extra visualizations (pipeline + validation only).",
+        help="Skip benchmarks (pipeline + validation only).",
     )
     parser.add_argument(
         "--data-dir",
@@ -71,10 +66,9 @@ def main() -> None:
         from benchmark_baselines import run_benchmarks
         run_benchmarks(str(raw_path), str(initial_path), str(output_dir))
 
-        # 4. Refinement visualizations (uses CSVs written to output_dir)
-        logger.info("=== 4. Refinement visualizations ===")
-        from visualize_refinement import main as viz_main
-        viz_main(str(output_dir))
+    logger.info("=== Results ===")
+    from print_results import main as print_results
+    print_results(str(output_dir))
 
     logger.info("Done. Outputs in %s", output_dir)
 

@@ -1,22 +1,21 @@
 # Diagnosing Predictability Limits of In Vitro Drug Release from Published PLGA Microparticle Data
 
 This repository provides a minimal reproduction protocol focused on generating results outputs.
-It intentionally excludes manuscript assets (paper drafts, TeX, figures source folders, submission scratch/fixes).
+It intentionally excludes manuscript assets (paper drafts, TeX, submission scratch/fixes).
 
 ---
 
 ## What this code reproduces
 
-- **Figures:** Mechanism map (Peppas n), applicability domain (Williams plot), feature importance, burst classifier importance, AD paradox, uncertainty calibration, benchmark comparison, burst classification confusion matrix.
 - **Tables / metrics:** Regression R² and MAE (Peppas n, Peppas K, Burst 24 h), burst classification accuracy, benchmark R² by model.
 - **Validation:** Strict 80/20 grouped train/test split for burst classification (no leakage).
 
 ### Result definition alignment
 
 When logic differs between prior artifact packaging and manuscript-sync definitions, this repository follows manuscript-sync result definitions in the pipeline:
-- Minimum release profile points per formulation: **3**
+- Minimum release profile points per formulation: **5, matching the curated dataset inclusion criterion.**
 - Peppas fit cutoff on release fraction: **`Release <= 0.60`**
-- Burst classification target: **binary**, positive class when **`Burst_24h > 0.20`**
+- Burst classification target: **binary**, positive class when **`Burst_24h >= 0.20`**
 
 ---
 
@@ -68,9 +67,9 @@ From the repository root, with the venv activated:
 python scripts/run_all.py
 ```
 
-This single command runs the full pipeline, validation, benchmarks, and visualizations. Outputs are written to `outputs/` (created automatically).
+This single command runs the full pipeline, validation, and benchmarks. Results are printed and written to `outputs/` (created automatically).
 
-**Optional:** `python scripts/run_all.py --fast` runs only the main pipeline and validation (no benchmarks or extra figures).
+**Optional:** `python scripts/run_all.py --fast` runs only the main pipeline and validation.
 
 ---
 
@@ -82,12 +81,11 @@ Generated under `outputs/`:
 |--------|-------------|
 | `performance_metrics.csv` | R², MAE, RMSE per target; burst classification accuracy |
 | `all_predictions_and_uncertainty.csv` | Per-sample predictions and uncertainty, including Formulation Index |
-| `Figure1_MechanismMap.png` | Predicted vs actual Peppas n |
-| `Figure2_ApplicabilityDomain.png` | Williams plot (Burst) |
-| `Figure3_FeatureImportance.png` | Top drivers of release mechanism |
-| `Figure5_BurstImportance.png` | Drivers of burst (safety) |
-| `Figure6_AD_Paradox.png` | R² in safe vs high-leverage zones |
-| (full run) `Figure4_UncertaintyCalibration.png`, `Figure5_BurstClassification.png`, `Figure6_Benchmarking.png`, `benchmark_results.csv` | Extra figures and benchmark table |
+| `burst_classification_metrics.csv` | Accuracy, macro-F1, precision, and recall |
+| `applicability_domain_metrics.csv` | Applicability-domain summary metrics |
+| `loso_results.csv` | Pooled leave-one-study-out metrics |
+| `loso_per_study.csv` | Per-study leave-one-study-out metrics |
+| (full run) `benchmark_results.csv` | Baseline benchmark metrics |
 
 ---
 

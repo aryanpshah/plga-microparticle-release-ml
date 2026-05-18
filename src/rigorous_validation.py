@@ -1,7 +1,4 @@
-"""
-Strict 80/20 grouped train/test validation: burst classification and AD analysis
-to confirm reported 100% accuracy is not due to leakage.
-"""
+"""Validation checks and LOSO metrics."""
 
 import logging
 from pathlib import Path
@@ -10,11 +7,22 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 import xgboost as xgb
+from sklearn.ensemble import RandomForestRegressor, StackingRegressor
 from sklearn.impute import SimpleImputer
-from sklearn.metrics import accuracy_score, confusion_matrix, mean_absolute_error, r2_score
+from sklearn.linear_model import Ridge
+from sklearn.metrics import (
+    accuracy_score,
+    confusion_matrix,
+    f1_score,
+    mean_absolute_error,
+    mean_squared_error,
+    precision_recall_fscore_support,
+    r2_score,
+)
 from sklearn.model_selection import GroupShuffleSplit
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
+from sklearn.svm import SVR
 
 from src.plga_pipeline_v2 import PLGAPrecisionPipeline
 
@@ -37,8 +45,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def write_loso_restricted_summary(repo_root: Path, output_dir: Path) -> None:
-    """Summarize LOSO from loso_per_study.csv (filtered by min formulations); write loso_restricted_summary.csv."""
-    loso_csv = repo_root / "loso_per_study.csv"
+    """Write a compact LOSO summary by target and minimum study size."""
+    loso_csv = output_dir / "loso_per_study.csv"
     if not loso_csv.is_file():
         return
     out_csv = output_dir / "loso_restricted_summary.csv"
@@ -87,6 +95,114 @@ def write_loso_restricted_summary(repo_root: Path, output_dir: Path) -> None:
     logger.info("Saved %s", out_csv)
 
 
+def _study_group_column(df: pd.DataFrame) -> str:
+    """Select DOI or another study-level identifier, never Formulation Index."""
+    for col in ["DOI", "doi", "Study", "Study ID", "Study_ID", "Reference", "Citation"]:
+        if col in df.columns and df[col].notna().any():
+            return col
+    raise ValueError("No DOI or study-level identifier column found for LOSO validation.")
+
+
+def _attach_study_groups(pipeline: PLGAPrecisionPipeline) -> pd.DataFrame:
+    df = pipeline.df.copy()
+    try:
+        _study_group_column(df)
+        return df
+    except ValueError:
+        pass
+    for source in [pipeline.raw_df, pipeline.initial_df]:
+        for col in ["DOI", "doi", "Study", "Study ID", "Study_ID", "Reference", "Citation"]:
+            if col in source.columns and "Formulation Index" in source.columns:
+                study_df = source[["Formulation Index", col]].dropna().drop_duplicates(subset="Formulation Index")
+                base_df = df.drop(columns=[col]) if col in df.columns else df
+                merged = base_df.merge(study_df, on="Formulation Index", how="left")
+                if merged[col].notna().any():
+                    return merged
+    return df
+
+
+def _stacked_regressor() -> StackingRegressor:
+    rf = RandomForestRegressor(n_estimators=100, max_depth=10, random_state=RANDOM_SEED, n_jobs=-1)
+    xgb_mod = xgb.XGBRegressor(
+        n_estimators=100, learning_rate=0.05, max_depth=6, n_jobs=-1,
+        objective="reg:squarederror", random_state=RANDOM_SEED,
+    )
+    svr = SVR(kernel="rbf", C=10, gamma="scale")
+    return StackingRegressor(
+        estimators=[("rf", rf), ("xgb", xgb_mod), ("svr", svr)],
+        final_estimator=Ridge(alpha=1.0),
+        cv=3,
+        n_jobs=-1,
+    )
+
+
+def run_loso_validation(pipeline: PLGAPrecisionPipeline, output_dir: Path) -> None:
+    """Run DOI or study-level leave-one-study-out validation."""
+    df = _attach_study_groups(pipeline)
+    group_col = _study_group_column(df)
+    feature_cols = FEATURE_COLS
+    targets = ["Peppas_n", "Peppas_K", "Burst_24h"]
+    pooled_rows = []
+    per_study_rows = []
+
+    for target in targets:
+        if target in ["Peppas_n", "Peppas_K"]:
+            valid_mask = df[["Peppas_n", "Peppas_K"]].notna().all(axis=1)
+        else:
+            valid_mask = df[target].notna()
+        curr = df.loc[valid_mask].copy()
+        curr = curr[curr[group_col].notna()].copy()
+        curr[group_col] = curr[group_col].astype(str).str.strip()
+        studies = curr[group_col].dropna().unique()
+        actual_all = []
+        pred_all = []
+
+        for study in studies:
+            train_df = curr[curr[group_col] != study]
+            test_df = curr[curr[group_col] == study]
+            if train_df.empty or test_df.empty:
+                continue
+
+            X_train = train_df[feature_cols].values
+            y_train = train_df[target].values
+            X_test = test_df[feature_cols].values
+            y_test = test_df[target].values
+
+            pipe = Pipeline([
+                ("imputer", SimpleImputer(strategy="mean")),
+                ("scaler", StandardScaler()),
+                ("model", _stacked_regressor()),
+            ])
+            pipe.fit(X_train, y_train)
+            preds = pipe.predict(X_test)
+
+            actual_all.extend(y_test)
+            pred_all.extend(preds)
+            r2 = r2_score(y_test, preds) if len(y_test) >= 2 else np.nan
+            per_study_rows.append({
+                "Target": target,
+                group_col: study,
+                "N_formulations": len(y_test),
+                "R2": r2,
+                "MAE": mean_absolute_error(y_test, preds),
+                "RMSE": np.sqrt(mean_squared_error(y_test, preds)),
+            })
+
+        actual_all = np.array(actual_all)
+        pred_all = np.array(pred_all)
+        pooled_rows.append({
+            "Target": target,
+            "GroupColumn": group_col,
+            "N": len(actual_all),
+            "R2": r2_score(actual_all, pred_all),
+            "MAE": mean_absolute_error(actual_all, pred_all),
+            "RMSE": np.sqrt(mean_squared_error(actual_all, pred_all)),
+        })
+
+    pd.DataFrame(pooled_rows).to_csv(output_dir / "loso_results.csv", index=False)
+    pd.DataFrame(per_study_rows).to_csv(output_dir / "loso_per_study.csv", index=False)
+
+
 def rigorous_validation(raw_path: str, initial_path: str, output_dir: Optional[str] = None) -> None:
     """Run 80/20 grouped split, fit on train only, report test accuracy and AD stats."""
     logger.info("=== RIGOROUS VALIDATION: LEAKAGE CHECK & AD ANALYSIS ===")
@@ -122,11 +238,9 @@ def rigorous_validation(raw_path: str, initial_path: str, output_dir: Optional[s
     logger.info("STEP 3: Burst Release Classification Check...")
     target = 'Burst_24h'
     
-    # Create Classes
     y_train_val = train_df[target]
     y_test_val = test_df[target]
     
-    # Filter NaNs
     train_mask = y_train_val.notna()
     test_mask = y_test_val.notna()
     
@@ -137,8 +251,7 @@ def rigorous_validation(raw_path: str, initial_path: str, output_dir: Optional[s
     
     def get_classes(y):
         y_class = np.zeros_like(y, dtype=int)
-        y_class[(y >= 10) & (y < 40)] = 1
-        y_class[y >= 40] = 2
+        y_class[y >= 0.20] = 1
         return y_class
         
     y_train_cls = get_classes(y_train_b)
@@ -146,8 +259,9 @@ def rigorous_validation(raw_path: str, initial_path: str, output_dir: Optional[s
     logger.info("Training Burst Classifier on %d samples...", len(y_train_cls))
     clf = xgb.XGBClassifier(
         n_estimators=200, max_depth=6, learning_rate=0.05, n_jobs=-1,
-        use_label_encoder=False, objective="multi:softprob", num_class=3,
-        eval_metric="mlogloss", random_state=RANDOM_SEED,
+        objective="binary:logistic",
+        eval_metric="logloss",
+        random_state=RANDOM_SEED,
     )
     clf.fit(X_train_b, y_train_cls)
     
@@ -156,8 +270,13 @@ def rigorous_validation(raw_path: str, initial_path: str, output_dir: Optional[s
     
     train_acc = accuracy_score(y_train_cls, train_preds)
     test_acc = accuracy_score(y_test_cls, test_preds)
+    test_macro_f1 = f1_score(y_test_cls, test_preds, average="macro")
+    precision, recall, _, support = precision_recall_fscore_support(
+        y_test_cls, test_preds, labels=[0, 1], zero_division=0
+    )
     logger.info("  -> Train Accuracy: %.4f", train_acc)
     logger.info("  -> Test Accuracy: %.4f (Previous reported: 1.0)", test_acc)
+    logger.info("  -> Test Macro-F1: %.4f", test_macro_f1)
     logger.info("  -> Test Confusion Matrix:\n%s", confusion_matrix(y_test_cls, test_preds))
     if test_acc < 0.99:
         logger.info("  [CONCLUSION] Leakage Confirmed. 100%% was an artifact of improper validation.")
@@ -185,17 +304,11 @@ def rigorous_validation(raw_path: str, initial_path: str, output_dir: Optional[s
     
     y_pred_test = reg.predict(X_test_n)
     
-    # Calculate AD Statistics
-    # H = X_test_scaled * (X_train_scaled.T * X_train_scaled)^-1 * X_train_scaled.T ... tricky for test set
-    # Standard approach for Test Set AD: Distance to training centroid or similar.
-    # But sticking to Williams Plot logic: Leverage of test point regarding the HAT matrix of Training Data.
+    # Use the Williams plot leverage form for held-out test points.
     # h_i = x_i^T (X_train^T X_train)^-1 x_i
-    
-    # Compute (X^T X)^-1 from Training Data
     try:
         XtX_inv = np.linalg.pinv(np.dot(X_train_n.T, X_train_n))
         
-        # Compute Leverage for Test Points
         levs = []
         for i in range(len(X_test_n)):
             x_vec = X_test_n[i]
@@ -204,19 +317,11 @@ def rigorous_validation(raw_path: str, initial_path: str, output_dir: Optional[s
             levs.append(h)
         levs = np.array(levs)
         
-        # Calculate Warning Leverage h*
         p = X_train_n.shape[1]
         n_train = X_train_n.shape[0]
         h_star = 3 * p / n_train
         
         logger.info("  Warning Leverage h*: %.4f", h_star)
-        
-        # Identify "Safe" vs "Unsafe"
-        # Standardized Residuals not available without "true" sigma, but we can use prediction error.
-        residuals = y_test_n - y_pred_test
-        # Standardize by Training RMSE or similar? 
-        # Williams plot usually uses standardized residuals of the *model fit*.
-        # Here we check if AE is lower in low leverage.
         
         safe_mask = levs < h_star
         unsafe_mask = ~safe_mask
@@ -248,6 +353,13 @@ def rigorous_validation(raw_path: str, initial_path: str, output_dir: Optional[s
         except ImportError:
             out_dir = REPO_ROOT / "outputs"
     out_dir.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame([
+        {"Class": int(cls), "Precision": precision[i], "Recall": recall[i], "Support": int(support[i])}
+        for i, cls in enumerate([0, 1])
+    ] + [
+        {"Class": "macro", "Precision": np.nan, "Recall": np.nan, "Support": int(len(y_test_cls)), "Accuracy": test_acc, "Macro_F1": test_macro_f1}
+    ]).to_csv(out_dir / "burst_classification_metrics.csv", index=False)
+    run_loso_validation(pipeline, out_dir)
     write_loso_restricted_summary(REPO_ROOT, out_dir)
 
 
